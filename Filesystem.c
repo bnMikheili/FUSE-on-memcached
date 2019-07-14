@@ -33,6 +33,8 @@ struct data
     char data[CHUNK_SIZE];
 };
 
+static int fs_access(const char *path, int mode);
+
 int find_response_index(char *response, char ch)
 {
     int i;
@@ -40,7 +42,6 @@ int find_response_index(char *response, char ch)
     {
         if (response[i] == ch)
         {
-            // printf("vedzebt: %s - shi, pasuxi: %d\n", response, i);
             return i + 1;
         }
     }
@@ -131,7 +132,6 @@ int get_parent_path_length(const char *path)
     }
     if (i == -1)
     {
-        // printf("AR YOFILA MTLIANI STRINGI\n");
         return -1;
     }
     if (i == 0)
@@ -170,9 +170,15 @@ int add_dir(const char *path, int isdir, mode_t mode)
     struct dir_struct *parent = get_dir_by_path(path, parent_end);
     if (parent == NULL)
     {
-        return -1;
+        return -ENOENT;
     }
-    int new_dir_index = add_new_dir_struct(path, isdir, getuid(), getgid(), mode);
+    char acc_buff[parent->name_length + 1];
+    memcpy(acc_buff, parent->name, parent->name_length);
+    int acc = fs_access(acc_buff, 2);
+    if (acc != 0)
+        return -EPERM;
+    struct fuse_context *cont = fuse_get_context();
+    int new_dir_index = add_new_dir_struct(path, isdir, cont->uid, cont->gid, mode);
     if ((parent->data_length % CHUNK_SIZE) == 0)
     {
         struct data data;
@@ -196,9 +202,9 @@ int add_dir(const char *path, int isdir, mode_t mode)
     return 0;
 }
 
-int write_in_chunk_center(struct dir_struct *dir, const char *buf, size_t size, off_t offset)
+int write_in_chunk_center(struct dir_struct *dir, const char *buf, size_t size, off_t offset, int xattr)
 {
-    struct data *inode = get_data_by_indexes(dir->index, offset / CHUNK_SIZE, 0);
+    struct data *inode = get_data_by_indexes(dir->index, offset / CHUNK_SIZE, xattr);
     if (inode == NULL)
     {
         inode = malloc(sizeof(struct data));
@@ -213,7 +219,7 @@ int write_in_chunk_center(struct dir_struct *dir, const char *buf, size_t size, 
     memcpy(inode->data + offset % CHUNK_SIZE, buf, num_write);
     if (inode->length < (offset % CHUNK_SIZE) + num_write)
         inode->length = (offset % CHUNK_SIZE) + num_write;
-    inode_big_command(CACHEFD, "set", dir->index, inode->index, sizeof(struct data), (char *)inode, 0);
+    inode_big_command(CACHEFD, "set", dir->index, inode->index, sizeof(struct data), (char *)inode, xattr);
     free(inode);
     return num_write;
 }
@@ -239,19 +245,19 @@ int read_from_chunk_center(struct dir_struct *dir, char *buf, size_t size, off_t
     return 0;
 }
 
-void delete_file_chunks(int parent_index, int new_length, int old_length)
+void delete_file_chunks(int parent_index, int new_length, int old_length, int xattr)
 {
     if (old_length <= new_length)
         return;
     int i;
     for (i = new_length / CHUNK_SIZE + 1; i < old_length / CHUNK_SIZE; i++)
     {
-        inode_delete_command(CACHEFD, parent_index, i, 0);
+        inode_delete_command(CACHEFD, parent_index, i, xattr);
     }
     if (new_length % CHUNK_SIZE == 0)
-        inode_delete_command(CACHEFD, parent_index, new_length / CHUNK_SIZE, 0);
+        inode_delete_command(CACHEFD, parent_index, new_length / CHUNK_SIZE, xattr);
     if (old_length % CHUNK_SIZE != 0 && ((new_length / CHUNK_SIZE) != (old_length / CHUNK_SIZE)))
-        inode_delete_command(CACHEFD, parent_index, old_length / CHUNK_SIZE, 0);
+        inode_delete_command(CACHEFD, parent_index, old_length / CHUNK_SIZE, xattr);
 }
 
 int get_permission(mode_t req, mode_t mode)
@@ -259,19 +265,25 @@ int get_permission(mode_t req, mode_t mode)
     mode_t result = req & mode;
     if (result == req)
         return 0;
-    return -EACCES;
+    return -EPERM;
 }
 
 int get_access(int request, mode_t mode, uid_t uid, gid_t gid)
 {
-    int result = 0;
-    if (uid == getuid())
-        result = get_permission(request * 64, mode);
-    if (gid == getgid())
-        result = get_permission(request * 8, mode);
-    if (uid != getuid() && gid != getgid())
-        result = get_permission(request, mode);
-    return result;
+    struct fuse_context *cont = fuse_get_context();
+    if (uid == cont->uid)
+    {
+        return get_permission(request * 64, mode);
+    }
+    if (gid == cont->gid)
+    {
+        return get_permission(request * 8, mode);
+    }
+    if (uid != cont->uid && gid != cont->gid)
+    {
+        return get_permission(request, mode);
+    }
+    return -1;
 }
 
 int check_path(const char *path)
@@ -309,7 +321,6 @@ static void *fs_init(struct fuse_conn_info *conn,
 
 static void fs_destroy(void *private_data)
 {
-    printf("%s\n", "fs_destroy");
     (void *)private_data;
     close(CACHEFD);
 }
@@ -317,7 +328,6 @@ static void fs_destroy(void *private_data)
 static int fs_getattr(const char *path, struct stat *stbuf,
                       struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_getattr", path);
     (void)fi;
     memset(stbuf, 0, sizeof(struct stat));
     struct dir_struct *dir_file = get_dir_by_path(path, strlen(path));
@@ -344,7 +354,6 @@ static int fs_getattr(const char *path, struct stat *stbuf,
 static int fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                       off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags)
 {
-    printf("%s for %s\n", "fs_readdir", path);
     (void)offset;
     (void)fi;
     (void)flags;
@@ -390,13 +399,13 @@ static int fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int fs_mkdir(const char *path, mode_t mode)
 {
-    printf("%s for %s\n", "fs_mkdir", path);
+    int acc = fs_access(path, 2);
     if (strlen(path) > 250)
         return -ENAMETOOLONG;
     int check = add_dir(path, 1, mode);
     if (check != 0)
     {
-        return -1;
+        return check;
     }
     else
         return 0;
@@ -404,6 +413,9 @@ static int fs_mkdir(const char *path, mode_t mode)
 
 static int fs_rmdir(const char *path)
 {
+    int acc = fs_access(path, 2);
+    if (acc != 0)
+        return -EPERM;
     printf("%s for %s\n", "fs_rmdir", path);
     int parent_end = get_parent_path_length(path);
     int parent_index = index_hash(path, parent_end);
@@ -462,31 +474,40 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 {
     printf("OPENING %s FLAGS: %d\n", path, fi->flags);
     int readable_path = check_path(path);
-    printf("readable path: %d\n", readable_path);
     if (readable_path != 0)
         return readable_path;
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     int result = 0;
     if (dir != NULL)
     {
-        if (dir->uid == getuid())
+        struct fuse_context *cont = fuse_get_context();
+        if (dir->uid == cont->uid)
             result = get_permission(fi->flags & S_IRWXU, dir->mode);
-        if (dir->gid == getgid())
+        if (dir->gid == cont->gid)
             result = get_permission(fi->flags & S_IRWXG, dir->mode);
-        if (dir->uid != getuid() && dir->gid != getgid())
+        if (dir->uid != cont->uid && dir->gid != cont->gid)
             result = get_permission(fi->flags & S_IRWXO, dir->mode);
+        int acc = fs_access(path, 2);
+        if ((fi->flags & O_TRUNC) && acc == 0)
+        {
+            delete_file_chunks(dir->index, 0, dir->data_length, 0);
+            dir->data_length = 0;
+            big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
+        }
+
         free(dir);
     }
     else
     {
         struct dir_struct *parent = get_dir_by_path(path, get_parent_path_length(path));
+        struct fuse_context *cont = fuse_get_context();
         if (parent == NULL)
             return -1;
-        if (parent->uid == getuid())
+        if (parent->uid == cont->uid)
             result = get_permission(S_IWUSR, parent->mode);
-        if (parent->gid == getgid())
+        if (parent->gid == cont->gid)
             result = get_permission(S_IWGRP, parent->mode);
-        if (parent->uid != getuid() && parent->gid != getgid())
+        if (parent->uid != cont->uid && parent->gid != cont->gid)
             result = get_permission(S_IWOTH, parent->mode);
         free(parent);
     }
@@ -495,20 +516,26 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 
 static int fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
+    int acc = fs_access(path, 4);
+    if (acc != 0)
+        return -EPERM;
     printf("%s for %s\n", "fs_write", path);
-    char buffer[size + 1];
-    memcpy(buffer, buf, size);
-    buffer[size] = 0;
+    int acc = fs_access(path, 2);
+    if (acc != 0)
+        return acc;
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -1;
     if (size == 0)
+    {
+        free(dir);
         return 0;
+    }
     // At first, if offset starts in the middle of the chunk, write starting part
     int written = 0;
     if (offset % CHUNK_SIZE != 0)
     {
-        written = write_in_chunk_center(dir, buf, size, offset);
+        written = write_in_chunk_center(dir, buf, size, offset, 0);
         if (written == 0)
         {
             free(dir);
@@ -518,9 +545,11 @@ static int fs_write(const char *path, const char *buf, size_t size, off_t offset
     // Check if that was enough
     if (written == size)
     {
-        delete_file_chunks(dir->index, offset + size, dir->data_length);
-        dir->data_length = offset + size;
-        big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
+        if (offset + size > dir->data_length)
+        {
+            dir->data_length = offset + size;
+            big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
+        }
         free(dir);
         return written;
     }
@@ -541,7 +570,6 @@ static int fs_write(const char *path, const char *buf, size_t size, off_t offset
     if (size % CHUNK_SIZE != 0)
     {
         int chunk_index = (size + offset) / CHUNK_SIZE;
-        // printf("CHUNK_INDEX:------------------------- %d\n", chunk_index);
         struct data *inode = get_data_by_indexes(dir->index, chunk_index, 0);
         if (inode == NULL)
         {
@@ -556,22 +584,17 @@ static int fs_write(const char *path, const char *buf, size_t size, off_t offset
         inode_big_command(CACHEFD, "set", dir->index, inode->index, sizeof(struct data), (char *)inode, 0);
         free(inode);
     }
-    // Check if the
-    if (dir->data_length > offset + size)
+    if (offset + size > dir->data_length)
     {
-        int delete_from = (offset + size) / CHUNK_SIZE;
+        dir->data_length = offset + size;
+        big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
     }
-    delete_file_chunks(dir->index, offset + size, dir->data_length);
-    dir->data_length = offset + size;
-    big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
-    // }
     free(dir);
     return written + size;
 }
 
 static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_create", path);
     if (strlen(path) > 250)
         return -ENAMETOOLONG;
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
@@ -587,13 +610,15 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 
 static int fs_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_utimens", path);
     return 0;
 }
 
 static int fs_read(const char *path, char *buf, size_t size, off_t offset,
                    struct fuse_file_info *fi)
 {
+    int acc = fs_access(path, 2);
+    if (acc != 0)
+        return -EPERM;
     printf("%s for %s\n", "fs_read", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
@@ -677,16 +702,20 @@ int fs_flush(const char *path, struct fuse_file_info *fi)
 
 static int fs_unlink(const char *path)
 {
+    int acc = fs_access(path, 2);
+    if (acc != 0)
+        return -EPERM;
     printf("%s for %s\n", "fs_unlink", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return 0;
-    delete_file_chunks(dir->index, 0, dir->data_length);
+    delete_file_chunks(dir->index, 0, dir->data_length, 0);
+    delete_file_chunks(dir->index, 0, dir->xattr_length, 1);
     dir->data_length = 0;
     big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
-    fs_rmdir(path);
+    int res = fs_rmdir(path);
     free(dir);
-    return 0;
+    return res;
 }
 
 static int fs_access(const char *path, int mode)
@@ -694,63 +723,236 @@ static int fs_access(const char *path, int mode)
     int readable_path = check_path(path);
     if (readable_path != 0)
         return readable_path;
-    printf("LOOKING FOR %s's access\n", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -1;
-    if (getuid() == 0)
-        mode = mode & 6; /////////
     int result = get_access(mode, dir->mode, dir->uid, dir->gid);
     free(dir);
     return result;
 }
 
+int find_xattr(char *data, const char *name, int data_length)
+{
+    printf("find_xattr for %s, data_length:%d\n", name, data_length);
+    int counter = 0;
+    while (counter < data_length)
+    {
+        int key_size = *(int *)(data + counter);
+        counter += sizeof(int);
+        char key[key_size + 1];
+        memcpy(key, data + counter, (size_t)key_size);
+        key[key_size] = 0;
+        if (strcmp(name, key) == 0)
+            return counter - sizeof(int);
+        counter += key_size;
+        int value_size = *(int *)(data + counter);
+        counter += sizeof(int) + value_size;
+    }
+    return -1;
+}
+
+int xattr_write(const char *path, const char *buf, size_t size, off_t offset)
+{
+    printf("%s for %s\n", "XATTR_WRITE", path);
+    struct dir_struct *dir = get_dir_by_path(path, strlen(path));
+    if (dir == NULL)
+        return -1;
+    if (size == 0)
+    {
+        delete_file_chunks(dir->index, offset + size, dir->xattr_length, 1);
+        dir->xattr_length = offset + size;
+        big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
+        free(dir);
+        return 0;
+    }
+    // At first, if offset starts in the middle of the chunk, write starting part
+    int written = 0;
+    if (offset % CHUNK_SIZE != 0)
+    {
+        written = write_in_chunk_center(dir, buf, size, offset, 1);
+        if (written == 0)
+        {
+            free(dir);
+            return 0;
+        }
+    }
+    // Check if that was enough
+    if (written == size)
+    {
+        delete_file_chunks(dir->index, offset + size, dir->xattr_length, 1);
+        dir->xattr_length = offset + size;
+        big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
+        free(dir);
+        return written;
+    }
+    buf += written;
+    size -= written;
+    offset += written;
+    // Write middle chunks
+    int i;
+    for (i = 0; i < size / CHUNK_SIZE; i++)
+    {
+        struct data inode;
+        inode.parent_index = dir->index;
+        inode.index = i + (offset / CHUNK_SIZE);
+        memcpy(inode.data, buf + (i * CHUNK_SIZE), CHUNK_SIZE);
+        inode_big_command(CACHEFD, "set", inode.parent_index, inode.index, sizeof(struct data), (char *)&inode, 1);
+    }
+    // Now write the last chunk
+    if (size % CHUNK_SIZE != 0)
+    {
+        int chunk_index = (size + offset) / CHUNK_SIZE;
+        struct data *inode = get_data_by_indexes(dir->index, chunk_index, 1);
+        if (inode == NULL)
+        {
+            inode = malloc(sizeof(struct data));
+            inode->parent_index = dir->index;
+            inode->index = chunk_index;
+            inode->length = 0;
+            bzero(inode->data, CHUNK_SIZE);
+        }
+        memcpy(inode->data, buf + size - (size % CHUNK_SIZE), size % CHUNK_SIZE);
+        inode->length = size % CHUNK_SIZE;
+        inode_big_command(CACHEFD, "set", dir->index, inode->index, sizeof(struct data), (char *)inode, 1);
+        free(inode);
+    }
+    delete_file_chunks(dir->index, offset + size, dir->xattr_length, 1);
+    dir->xattr_length = offset + size;
+    big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
+    free(dir);
+    return written + size;
+}
+
 static int fs_setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
 {
-    // struct dir_struct *dir = get_dir_by_path(path, strlen(path));
-    // if (dir == NULL)
-    //     return -1;
-    // int attr_index = index_hash(name, strlen(name));
-    // struct data *attr = get_data_by_indexes(dir->index, attr_index, 1);
-
-    // int new_dir_index = add_new_dir_struct(path, isdir, getuid(), getgid(), mode);
-    // if ((parent->data_length % CHUNK_SIZE) == 0)
-    // {
-    //     struct data data;
-    //     data.index = parent->data_length / CHUNK_SIZE;
-    //     data.parent_index = parent->index;
-    //     data.length = sizeof(int);
-    //     memcpy(data.data, &new_dir_index, sizeof(int));
-    //     inode_big_command(CACHEFD, "set", parent->index, data.index, sizeof(struct data), (char *)&data, 0);
-    // }
-    // else
-    // {
-    //     struct data *dat = get_data_by_indexes(parent->index, parent->data_length / CHUNK_SIZE, 0);
-    //     memcpy(dat->data + dat->length, &new_dir_index, sizeof(int));
-    //     dat->length += sizeof(int);
-    //     inode_big_command(CACHEFD, "set", parent->index, dat->index, sizeof(struct data), (char *)dat, 0);
-    //     free(dat);
-    // }
-    // parent->data_length += sizeof(int);
-    // big_command(CACHEFD, "set", parent->index, 0, 0, sizeof(struct dir_struct), (char *)parent);
-    // free(parent);
-    // return 0;
-
+    printf("SETXATTR for: %s-%s in %s\n", name, value, path);
+    struct dir_struct *dir = get_dir_by_path(path, strlen(path));
+    if (dir == NULL)
+        return -1;
+    char pairs[dir->xattr_length];
+    int check = get_full_data(dir->index, dir->xattr_length, pairs, 1);
+    if (check != 0)
+        int name_index = find_xattr(pairs, name, dir->xattr_length);
+    if (name_index == -1)
+    {
+        int name_length = strlen(name);
+        char buffer[sizeof(int) * 2 + strlen(name) + size];
+        memcpy(buffer, &name_length, sizeof(int));
+        memcpy(buffer + sizeof(int), name, strlen(name));
+        int value_length = (int)size;
+        memcpy(buffer + sizeof(int) + strlen(name), &value_length, sizeof(int));
+        memcpy(buffer + 2 * sizeof(int) + strlen(name), value, size);
+        size_t written = xattr_write(path, buffer,
+                                     sizeof(int) * 2 + strlen(name) + size,
+                                     dir->xattr_length);
+        free(dir);
+    }
+    else
+    {
+        int name_length = *(int *)(pairs + name_index);
+        int start_index = name_index + sizeof(int) + name_length;
+        int value_size = (int)size;
+        char buffer[sizeof(int) + size];
+        memcpy(buffer, &value_size, sizeof(int));
+        memcpy(buffer + sizeof(int), value, size);
+        size_t written = xattr_write(path, buffer, sizeof(int) + size,
+                                     start_index);
+        int old_value_size = *(int *)(pairs + start_index);
+        size_t end_size = (size_t)(dir->xattr_length - start_index - sizeof(int) - old_value_size);
+        off_t end_offset = (off_t)(start_index + sizeof(int) + size);
+        written = xattr_write(path, pairs + start_index + sizeof(int) + old_value_size,
+                              end_size, end_offset);
+        free(dir);
+    }
     return 0;
 }
 
 static int fs_getxattr(const char *path, const char *name, char *value, size_t size)
 {
-    return 0;
+    printf("GETXATTR for: %s in: %s\n", name, path);
+    struct dir_struct *dir = get_dir_by_path(path, strlen(path));
+    if (dir == NULL)
+        return -ENOENT;
+    char pairs[dir->xattr_length];
+    int check = get_full_data(dir->index, dir->xattr_length, pairs, 1);
+    if (check != 0)
+        int name_index = find_xattr(pairs, name, dir->xattr_length);
+    if (name_index == -1)
+    {
+        free(dir);
+        return -ENODATA;
+    }
+    int name_length = *(int *)(pairs + name_index);
+    int value_lenght = *(int *)(pairs + name_index + sizeof(int) + name_length);
+    if (value == NULL)
+    {
+        free(dir);
+        return value_lenght;
+    }
+    memcpy(value, pairs + name_index + 2 * sizeof(int) + name_length, value_lenght);
+    value[value_lenght] = 0;
+    free(dir);
+    return value_lenght;
 }
 
 static int fs_listxattr(const char *path, char *list, size_t size)
 {
-    return 0;
+    printf("LISTXATTR for: %s\n", path);
+    struct dir_struct *dir = get_dir_by_path(path, strlen(path));
+    if (dir == NULL)
+        return -ENOENT;
+    char pairs[dir->xattr_length];
+    int check = get_full_data(dir->index, dir->xattr_length, pairs, 1);
+    int counter = 0;
+    int list_size = 0;
+    while (counter < dir->xattr_length)
+    {
+        int key_size = *(int *)(pairs + counter);
+        counter += sizeof(int);
+        char key[key_size + 1];
+        memcpy(key, pairs + counter, (size_t)key_size);
+        key[key_size] = 0;
+        counter += key_size;
+        int value_size = *(int *)(pairs + counter);
+        char value[value_size + 1];
+        memcpy(value, pairs + counter + sizeof(int), value_size);
+        value[value_size] = 0;
+        counter += sizeof(int) + value_size;
+        if (list != NULL)
+        {
+            memcpy(list + list_size, key, key_size + 1);
+        }
+        list_size += key_size + 1;
+    }
+    free(dir);
+    return list_size;
 }
 
-static int fs_removexattr(const char *path, const char *list)
+static int fs_removexattr(const char *path, const char *name)
 {
+    printf("REMOVEXATTR for: %s in %s\n", name, path);
+    struct dir_struct *dir = get_dir_by_path(path, strlen(path));
+    if (dir == NULL)
+        return -ENOENT;
+    char pairs[dir->xattr_length];
+    int check = get_full_data(dir->index, dir->xattr_length, pairs, 1);
+    int name_index = find_xattr(pairs, name, dir->xattr_length);
+    if (name_index == -1)
+    {
+        free(dir);
+        return -ENODATA;
+    }
+    else
+    {
+        int name_length = *(int *)(pairs + name_index);
+        int start_index = name_index + sizeof(int) + name_length;
+        int old_value_size = *(int *)(pairs + start_index);
+        size_t end_size = (size_t)(dir->xattr_length - start_index - sizeof(int) - old_value_size);
+        off_t start_offset = (off_t)name_index;
+        int written = xattr_write(path, pairs + start_index + sizeof(int) + old_value_size,
+                                  end_size, start_offset);
+        free(dir);
+    }
     return 0;
 }
 
@@ -762,13 +964,11 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -ENOENT;
-    if (dir->uid != geteuid())
+    struct fuse_context *cont = fuse_get_context();
+    if (dir->uid != cont->uid)
     {
-        if (getuid() < 0 || getuid() != geteuid())
-        {
-            free(dir);
-            return -EPERM;
-        }
+        free(dir);
+        return -EPERM;
     }
     dir->mode = mode;
     big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
@@ -784,13 +984,11 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -ENOENT;
-    if (dir->uid != geteuid())
+    struct fuse_context *cont = fuse_get_context();
+    if (dir->uid != cont->uid)
     {
-        if (getuid() < 0 || getuid() != geteuid())
-        {
-            free(dir);
-            return -EPERM;
-        }
+        free(dir);
+        return -EPERM;
     }
     if (uid != -1)
         dir->uid = uid;
