@@ -971,7 +971,7 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (dir == NULL)
         return -ENOENT;
     struct fuse_context *cont = fuse_get_context();
-    if (dir->uid != cont->uid)
+    if (dir->uid != cont->uid && cont->uid != 0)
     {
         free(dir);
         return -EPERM;
@@ -993,9 +993,10 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
     struct fuse_context *cont = fuse_get_context();
     if (dir->uid != 0)
     {
-        if (uid == -1 && dir->uid == cont->uid && cont->gid == gid)
+        if ((uid == -1 || uid == dir->uid) && dir->uid == cont->uid && cont->gid == gid)
         {
             dir->gid = gid;
+            big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
         }
         free(dir);
         return -EPERM;
@@ -1006,6 +1007,11 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
         dir->gid = gid;
     big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
     free(dir);
+    return 0;
+}
+
+static int fs_releasedir(const char *path, struct fuse_file_info *fi)
+{
     return 0;
 }
 
@@ -1032,6 +1038,7 @@ static struct fuse_operations fs_oper = {
     .removexattr = fs_removexattr,
     .chmod = fs_chmod,
     .chown = fs_chown,
+    .releasedir = fs_releasedir,
 };
 
 int main(int argc, char *argv[])
