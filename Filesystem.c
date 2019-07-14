@@ -10,6 +10,7 @@
 #include "memcache.h"
 
 #define CHUNK_SIZE 1024
+#define CHECKER 1000000010
 int CACHEFD;
 
 struct dir_struct
@@ -311,7 +312,19 @@ static void *fs_init(struct fuse_conn_info *conn,
     (void)conn;
     cfg->kernel_cache = 1;
     CACHEFD = get_cachefd();
+    char *misho_fs = get(CACHEFD, CHECKER);
+    printf("--- %s\n", misho_fs);
+    if (find_response_index(misho_fs, '\n') > 5)
+    {
+        struct dir_struct *dir = get_dir_by_path("/", 1);
+        if (dir != NULL)
+        {
+            free(misho_fs);
+            return NULL;
+        }
+    }
     command(CACHEFD, "flush_all");
+    big_command(CACHEFD, "add", CHECKER, 0, 0, strlen("check"), "check");
     add_new_dir_struct("/", 1, getuid(), getgid(), (S_IFDIR | 0755));
     return NULL;
 }

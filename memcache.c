@@ -22,6 +22,7 @@ char *get(int cachefd, int key)
     read(cachefd, response_buff, BUFF_LENGTH);
     return response_buff;
 }
+
 void index_init(int cachefd)
 {
     write(cachefd, "add INDEX 0 0 1\r\n1\r\n", strlen("add INDEX 0 0 1\r\n1\r\n"));
