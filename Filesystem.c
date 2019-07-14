@@ -345,6 +345,10 @@ static int fs_getattr(const char *path, struct stat *stbuf,
         return -ENOENT;
     stbuf->st_uid = dir_file->uid;
     stbuf->st_gid = dir_file->gid;
+    stbuf->st_blksize = CHUNK_SIZE;
+    stbuf->st_blocks = (dir_file->data_length / CHUNK_SIZE) * 2;
+    if (dir_file->data_length % CHUNK_SIZE >= 512)
+        stbuf->st_blocks += (dir_file->data_length / CHUNK_SIZE) * 2;
     if (dir_file->is_dir == 1)
     {
         stbuf->st_mode = S_IFDIR | dir_file->mode;
@@ -987,8 +991,12 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
     if (dir == NULL)
         return -ENOENT;
     struct fuse_context *cont = fuse_get_context();
-    if (dir->uid != cont->uid)
+    if (dir->uid != 0)
     {
+        if (uid == -1 && dir->uid == cont->uid && cont->gid == gid)
+        {
+            dir->gid = gid;
+        }
         free(dir);
         return -EPERM;
     }
