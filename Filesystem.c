@@ -343,6 +343,9 @@ static int fs_getattr(const char *path, struct stat *stbuf,
     struct dir_struct *dir_file = get_dir_by_path(path, strlen(path));
     if (dir_file == NULL)
         return -ENOENT;
+    int acc = fs_access(path, 4);
+    if (acc != 0)
+        return -EPERM;
     stbuf->st_uid = dir_file->uid;
     stbuf->st_gid = dir_file->gid;
     stbuf->st_blksize = CHUNK_SIZE;
@@ -371,6 +374,9 @@ static int fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     (void)offset;
     (void)fi;
     (void)flags;
+    int acc = fs_access(path, 4);
+    if (acc != 0)
+        return -EPERM;
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
     {
@@ -413,9 +419,15 @@ static int fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int fs_mkdir(const char *path, mode_t mode)
 {
-    int acc = fs_access(path, 2);
     if (strlen(path) > 250)
         return -ENAMETOOLONG;
+    int parent_index = get_parent_path_length(path);
+    char parent[parent_index + 1];
+    memcpy(parent, path, parent_index);
+    parent[parent_index] = 0;
+    int acc = fs_access(parent, 2);
+    if (acc != 0)
+        return acc;
     int check = add_dir(path, 1, mode);
     if (check != 0)
     {
@@ -427,6 +439,9 @@ static int fs_mkdir(const char *path, mode_t mode)
 
 static int fs_rmdir(const char *path)
 {
+    int acc = fs_access(path, 2);
+    if (acc != 0)
+        return -EPERM;
     printf("%s for %s\n", "fs_rmdir", path);
     int parent_end = get_parent_path_length(path);
     int parent_index = index_hash(path, parent_end);
@@ -605,6 +620,13 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (strlen(path) > 250)
         return -ENAMETOOLONG;
+    int parent_index = get_parent_path_length(path);
+    char parent[parent_index + 1];
+    memcpy(parent, path, parent_index);
+    parent[parent_index] = 0;
+    int acc = fs_access(parent, 2);
+    if (acc != 0)
+        return acc;
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
     {
@@ -624,7 +646,7 @@ static int fs_utimens(const char *path, const struct timespec tv[2], struct fuse
 static int fs_read(const char *path, char *buf, size_t size, off_t offset,
                    struct fuse_file_info *fi)
 {
-    int acc = fs_access(path, 2);
+    int acc = fs_access(path, 4);
     if (acc != 0)
         return -EPERM;
     printf("%s for %s\n", "fs_read", path);
