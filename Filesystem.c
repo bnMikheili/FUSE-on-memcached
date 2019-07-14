@@ -173,10 +173,7 @@ int add_dir(const char *path, int isdir, mode_t mode)
         return -ENOENT;
     }
     char acc_buff[parent->name_length + 1];
-    memcpy(acc_buff, parent->name, parent->name_length);
-    int acc = fs_access(acc_buff, 2);
-    if (acc != 0)
-        return -EPERM;
+
     struct fuse_context *cont = fuse_get_context();
     int new_dir_index = add_new_dir_struct(path, isdir, cont->uid, cont->gid, mode);
     if ((parent->data_length % CHUNK_SIZE) == 0)
@@ -413,9 +410,6 @@ static int fs_mkdir(const char *path, mode_t mode)
 
 static int fs_rmdir(const char *path)
 {
-    int acc = fs_access(path, 2);
-    if (acc != 0)
-        return -EPERM;
     printf("%s for %s\n", "fs_rmdir", path);
     int parent_end = get_parent_path_length(path);
     int parent_index = index_hash(path, parent_end);
@@ -516,9 +510,6 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 
 static int fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    int acc = fs_access(path, 4);
-    if (acc != 0)
-        return -EPERM;
     printf("%s for %s\n", "fs_write", path);
     int acc = fs_access(path, 2);
     if (acc != 0)
@@ -713,9 +704,9 @@ static int fs_unlink(const char *path)
     delete_file_chunks(dir->index, 0, dir->xattr_length, 1);
     dir->data_length = 0;
     big_command(CACHEFD, "set", dir->index, 0, 0, sizeof(struct dir_struct), (char *)dir);
-    int res = fs_rmdir(path);
+    fs_rmdir(path);
     free(dir);
-    return res;
+    return 0;
 }
 
 static int fs_access(const char *path, int mode)
@@ -831,8 +822,7 @@ static int fs_setxattr(const char *path, const char *name, const char *value, si
         return -1;
     char pairs[dir->xattr_length];
     int check = get_full_data(dir->index, dir->xattr_length, pairs, 1);
-    if (check != 0)
-        int name_index = find_xattr(pairs, name, dir->xattr_length);
+    int name_index = find_xattr(pairs, name, dir->xattr_length);
     if (name_index == -1)
     {
         int name_length = strlen(name);
@@ -875,8 +865,7 @@ static int fs_getxattr(const char *path, const char *name, char *value, size_t s
         return -ENOENT;
     char pairs[dir->xattr_length];
     int check = get_full_data(dir->index, dir->xattr_length, pairs, 1);
-    if (check != 0)
-        int name_index = find_xattr(pairs, name, dir->xattr_length);
+    int name_index = find_xattr(pairs, name, dir->xattr_length);
     if (name_index == -1)
     {
         free(dir);
