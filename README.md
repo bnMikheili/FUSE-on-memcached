@@ -44,5 +44,3 @@ When it came to storing data in memcached, I needed an effective way of storing 
 **parent_index** is the index of the owner file/folder, and the **index** is the chunk index of the data. This approach gives us ability to get the data chunk instantly for any data offset and therefore, the ability of **RANDOM ACCESS**. for ans offset we can easily calculate the chunk index in O(1) and send request to memcached for the data. Also, as long as we know the size of the data from the "dir_struct.data_length" variable, we can iterate on chunks and get the whole data if we need to. 
 
 The maximum index of chunk depends on size of the data, but the size of int is greater than the number of chunks needed to store **1GB** data, so it won't make any problem. As we knew that the data is transfered along the TCP connection, which sends buckets with maximum size of 1500, I chose the "CHUNK_SIZE" to be 1024. 
-
-Although the data is stored the same way for files and folders, we need to have the different approaches operating with them, because the file's data is actual data and the folders data is files and folders. There
