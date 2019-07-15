@@ -23,6 +23,7 @@ struct dir_struct
     int data_length;
     int xattr_length;
     int name_length;
+    int is_symlink;
     char name[250];
 };
 
@@ -143,7 +144,7 @@ int get_parent_path_length(const char *path)
 }
 
 /* Creates a new directory structure for the path and adds it to memcache */
-int add_new_dir_struct(const char *path, int isdir, uid_t uid, gid_t gid, mode_t mode)
+int add_new_dir_struct(const char *path, int isdir, uid_t uid, gid_t gid, mode_t mode, int symlink)
 {
     int new_dir_index = index_hash(path, strlen(path));
     struct dir_struct new_dir;
@@ -153,6 +154,7 @@ int add_new_dir_struct(const char *path, int isdir, uid_t uid, gid_t gid, mode_t
     new_dir.uid = uid;
     new_dir.gid = gid;
     new_dir.mode = mode;
+    new_dir.is_symlink = symlink;
     new_dir.xattr_length = 0;
     new_dir.name_length = strlen(path);
     memcpy(new_dir.name, path, new_dir.name_length);
@@ -161,7 +163,7 @@ int add_new_dir_struct(const char *path, int isdir, uid_t uid, gid_t gid, mode_t
 }
 
 /* Creates new directory and adds it to the structure */
-int add_dir(const char *path, int isdir, mode_t mode)
+int add_dir(const char *path, int isdir, mode_t mode, int symlink)
 {
     int parent_end = get_parent_path_length(path);
     if (parent_end == -1)
@@ -176,7 +178,7 @@ int add_dir(const char *path, int isdir, mode_t mode)
     char acc_buff[parent->name_length + 1];
 
     struct fuse_context *cont = fuse_get_context();
-    int new_dir_index = add_new_dir_struct(path, isdir, cont->uid, cont->gid, mode);
+    int new_dir_index = add_new_dir_struct(path, isdir, cont->uid, cont->gid, mode, symlink);
     if ((parent->data_length % CHUNK_SIZE) == 0)
     {
         struct data data;
@@ -325,7 +327,7 @@ static void *fs_init(struct fuse_conn_info *conn,
     }
     command(CACHEFD, "flush_all");
     big_command(CACHEFD, "add", CHECKER, 0, 0, strlen("check"), "check");
-    add_new_dir_struct("/", 1, getuid(), getgid(), (S_IFDIR | 0755));
+    add_new_dir_struct("/", 1, getuid(), getgid(), (S_IFDIR | 0755), 0);
     return NULL;
 }
 
@@ -352,6 +354,12 @@ static int fs_getattr(const char *path, struct stat *stbuf,
     stbuf->st_blocks = (dir_file->data_length / CHUNK_SIZE) * 2;
     if (dir_file->data_length % CHUNK_SIZE >= 512)
         stbuf->st_blocks += (dir_file->data_length / CHUNK_SIZE) * 2;
+    if (dir_file->is_symlink == 1)
+    {
+        stbuf->st_mode = S_IFLNK | dir_file->mode;
+        free(dir_file);
+        return 0;
+    }
     if (dir_file->is_dir == 1)
     {
         stbuf->st_mode = S_IFDIR | dir_file->mode;
@@ -428,7 +436,7 @@ static int fs_mkdir(const char *path, mode_t mode)
     int acc = fs_access(parent, 2);
     if (acc != 0)
         return acc;
-    int check = add_dir(path, 1, mode);
+    int check = add_dir(path, 1, mode, 0);
     if (check != 0)
     {
         return check;
@@ -630,7 +638,7 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
     {
-        int res = add_dir(path, 0, mode);
+        int res = add_dir(path, 0, mode, 0);
         if (res != 0)
             return res;
     }
@@ -1013,7 +1021,8 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
     if (dir == NULL)
         return -ENOENT;
     struct fuse_context *cont = fuse_get_context();
-    if (dir->uid != 0)
+    printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!context id: %d, %d\n", cont->uid, dir->uid);
+    if (cont->uid != 0)
     {
         if ((uid == -1 || uid == dir->uid) && dir->uid == cont->uid && cont->gid == gid)
         {
@@ -1034,6 +1043,39 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
 
 static int fs_releasedir(const char *path, struct fuse_file_info *fi)
 {
+    return 0;
+}
+
+static int fs_symlink(const char *from, const char *to)
+{
+    printf("FS_SYMLINK to: %s, from: %s\n", to, from);
+    int parent_ind = get_parent_path_length(to);
+    char full_from[parent_ind + strlen(from) + 1];
+    memcpy(full_from, to, parent_ind);
+    memcpy(full_from + parent_ind, from, strlen(from));
+    full_from[parent_ind + strlen(from)] = 0;
+    struct dir_struct *dir_from = get_dir_by_path(full_from, strlen(full_from));
+    if (dir_from == NULL)
+        return -ENOENT;
+    add_dir(to, dir_from->is_dir, dir_from->mode, 1);
+    fs_write(to, from, strlen(full_from), 0, NULL);
+    free(dir_from);
+    return 0;
+}
+
+static int fs_readlink(const char *path, char *buf, size_t size)
+{
+    struct dir_struct *dir = get_dir_by_path(path, strlen(path));
+    char data[dir->data_length + 1];
+    int check = get_full_data(dir->index, dir->data_length, data, 0);
+    if (check != 0)
+        return check;
+    data[dir->data_length] = 0;
+    int length = dir->data_length + 1;
+    if (size < length)
+        length = size;
+    memcpy(buf, data, length);
+    free(dir);
     return 0;
 }
 
@@ -1061,6 +1103,8 @@ static struct fuse_operations fs_oper = {
     .chmod = fs_chmod,
     .chown = fs_chown,
     .releasedir = fs_releasedir,
+    .symlink = fs_symlink,
+    .readlink = fs_readlink,
 };
 
 int main(int argc, char *argv[])
