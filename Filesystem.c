@@ -271,7 +271,7 @@ int get_permission(mode_t req, mode_t mode)
 int get_access(int request, mode_t mode, uid_t uid, gid_t gid)
 {
     struct fuse_context *cont = fuse_get_context();
-    if (uid == cont->uid)
+    if (uid == cont->uid || cont->uid == 0)
     {
         return get_permission(request * 64, mode);
     }
@@ -315,7 +315,6 @@ static void *fs_init(struct fuse_conn_info *conn,
     cfg->kernel_cache = 1;
     CACHEFD = get_cachefd();
     char *misho_fs = get(CACHEFD, CHECKER);
-    printf("--- %s\n", misho_fs);
     if (find_response_index(misho_fs, '\n') > 5)
     {
         struct dir_struct *dir = get_dir_by_path("/", 1);
@@ -345,9 +344,6 @@ static int fs_getattr(const char *path, struct stat *stbuf,
     struct dir_struct *dir_file = get_dir_by_path(path, strlen(path));
     if (dir_file == NULL)
         return -ENOENT;
-    int acc = fs_access(path, 4);
-    if (acc != 0)
-        return -EPERM;
     stbuf->st_uid = dir_file->uid;
     stbuf->st_gid = dir_file->gid;
     stbuf->st_blksize = CHUNK_SIZE;
@@ -450,7 +446,6 @@ static int fs_rmdir(const char *path)
     int acc = fs_access(path, 2);
     if (acc != 0)
         return -EPERM;
-    printf("%s for %s\n", "fs_rmdir", path);
     int parent_end = get_parent_path_length(path);
     int parent_index = index_hash(path, parent_end);
     int index = index_hash(path, strlen(path));
@@ -506,7 +501,6 @@ static int fs_rmdir(const char *path)
 
 static int fs_open(const char *path, struct fuse_file_info *fi)
 {
-    printf("OPENING %s FLAGS: %d\n", path, fi->flags);
     int readable_path = check_path(path);
     if (readable_path != 0)
         return readable_path;
@@ -515,7 +509,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     if (dir != NULL)
     {
         struct fuse_context *cont = fuse_get_context();
-        if (dir->uid == cont->uid)
+        if (dir->uid == cont->uid || cont->uid == 0)
             result = get_permission(fi->flags & S_IRWXU, dir->mode);
         if (dir->gid == cont->gid)
             result = get_permission(fi->flags & S_IRWXG, dir->mode);
@@ -537,7 +531,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         struct fuse_context *cont = fuse_get_context();
         if (parent == NULL)
             return -1;
-        if (parent->uid == cont->uid)
+        if (parent->uid == cont->uid || cont->uid == 0)
             result = get_permission(S_IWUSR, parent->mode);
         if (parent->gid == cont->gid)
             result = get_permission(S_IWGRP, parent->mode);
@@ -550,7 +544,6 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 
 static int fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_write", path);
     int acc = fs_access(path, 2);
     if (acc != 0)
         return acc;
@@ -657,7 +650,6 @@ static int fs_read(const char *path, char *buf, size_t size, off_t offset,
     int acc = fs_access(path, 4);
     if (acc != 0)
         return -EPERM;
-    printf("%s for %s\n", "fs_read", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -1;
@@ -722,19 +714,16 @@ static int fs_read(const char *path, char *buf, size_t size, off_t offset,
 
 int fs_fsync(const char *path, int num, struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_fsync", path);
     return 0;
 }
 
 int fs_fsyncdir(const char *path, int num, struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_fsyncdir", path);
     return 0;
 }
 
 int fs_flush(const char *path, struct fuse_file_info *fi)
 {
-    printf("%s for %s\n", "fs_flush", path);
     return 0;
 }
 
@@ -743,7 +732,6 @@ static int fs_unlink(const char *path)
     int acc = fs_access(path, 2);
     if (acc != 0)
         return -EPERM;
-    printf("%s for %s\n", "fs_unlink", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return 0;
@@ -771,7 +759,6 @@ static int fs_access(const char *path, int mode)
 
 int find_xattr(char *data, const char *name, int data_length)
 {
-    printf("find_xattr for %s, data_length:%d\n", name, data_length);
     int counter = 0;
     while (counter < data_length)
     {
@@ -791,7 +778,6 @@ int find_xattr(char *data, const char *name, int data_length)
 
 int xattr_write(const char *path, const char *buf, size_t size, off_t offset)
 {
-    printf("%s for %s\n", "XATTR_WRITE", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -1;
@@ -863,7 +849,6 @@ int xattr_write(const char *path, const char *buf, size_t size, off_t offset)
 
 static int fs_setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
 {
-    printf("SETXATTR for: %s-%s in %s\n", name, value, path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -1;
@@ -906,7 +891,6 @@ static int fs_setxattr(const char *path, const char *name, const char *value, si
 
 static int fs_getxattr(const char *path, const char *name, char *value, size_t size)
 {
-    printf("GETXATTR for: %s in: %s\n", name, path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -ENOENT;
@@ -933,7 +917,6 @@ static int fs_getxattr(const char *path, const char *name, char *value, size_t s
 
 static int fs_listxattr(const char *path, char *list, size_t size)
 {
-    printf("LISTXATTR for: %s\n", path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -ENOENT;
@@ -966,7 +949,6 @@ static int fs_listxattr(const char *path, char *list, size_t size)
 
 static int fs_removexattr(const char *path, const char *name)
 {
-    printf("REMOVEXATTR for: %s in %s\n", name, path);
     struct dir_struct *dir = get_dir_by_path(path, strlen(path));
     if (dir == NULL)
         return -ENOENT;
@@ -1021,7 +1003,6 @@ static int fs_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
     if (dir == NULL)
         return -ENOENT;
     struct fuse_context *cont = fuse_get_context();
-    printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!context id: %d, %d\n", cont->uid, dir->uid);
     if (cont->uid != 0)
     {
         if ((uid == -1 || uid == dir->uid) && dir->uid == cont->uid && cont->gid == gid)
@@ -1048,7 +1029,6 @@ static int fs_releasedir(const char *path, struct fuse_file_info *fi)
 
 static int fs_symlink(const char *from, const char *to)
 {
-    printf("FS_SYMLINK to: %s, from: %s\n", to, from);
     int parent_ind = get_parent_path_length(to);
     char full_from[parent_ind + strlen(from) + 1];
     memcpy(full_from, to, parent_ind);

@@ -96,8 +96,6 @@ void inode_big_command(int cachefd, char *command, int parent_index, int index, 
     char response_buff[1024];
     bzero(response_buff, 1024);
     read(cachefd, response_buff, 1024);
-    printf("CACHE: %s %d%c%d\n", command, parent_index, sep, index);
-    printf("RESPONSE: %s\n", response_buff);
 }
 
 char *inode_get(int cachefd, int parent_index, int index, int xattr)
